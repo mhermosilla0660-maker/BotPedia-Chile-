@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BotPedia Chile - Avatar de Voz</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main>
+    <h1>🤖 BotPedia Chile — Avatar de Voz (WebRTC)</h1>
+    <p class="disclaimer">
+      Modo de <strong>simulación educativa</strong> para prebriefing en pediatría intrahospitalaria. 
+      No reemplaza atención ni indicación médica real. Sigue protocolos institucionales.
+    </p>
+
+    <section class="controls">
+      <button id="connectBtn">Conectar</button>
+      <button id="muteBtn" disabled>Silenciar</button>
+      <button id="hangupBtn" disabled>Colgar</button>
+    </section>
+
+    <section class="talk">
+      <p>Presiona <em>Conectar</em> y comienza a hablar. Prueba con: “Niño de 6 años con ataque de asma”</p>
+      <div class="vu">
+        <div id="vuMeter" class="bar"></div>
+      </div>
+      <audio id="remoteAudio" autoplay></audio>
+    </section>
+
+    <section class="log">
+      <h3>Registro</h3>
+      <pre id="log"></pre>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
