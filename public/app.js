@@ -4,7 +4,8 @@
   const muteBtn = document.getElementById("muteBtn");
   const hangupBtn = document.getElementById("hangupBtn");
 
-  let pc, localStream;
+  let pc, localStream, dc;
+
   const log = (m) => {
     const t = new Date().toLocaleTimeString();
     logBox.textContent += `[${t}] ${m}\n`;
@@ -21,11 +22,32 @@
         iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
       });
 
-      // 2) Capturar micrófono
+      // 2) Canal de datos para eventos Realtime
+      dc = pc.createDataChannel("oai-events");
+      dc.onopen = () => {
+        log("🛰️ DataChannel abierto, pidiendo respuesta de audio…");
+        // Envia el comando para que el modelo HABLE en español
+        const msg = {
+          type: "response.create",
+          response: {
+            modalities: ["audio"],      // queremos audio de salida
+            instructions:
+              "Habla en español chileno, claro y breve. " +
+              "Eres BotPedia Chile, avatar de simulación educativa. " +
+              "Si detectas audio de usuario, salúdale y pídele que te cuente el caso.",
+            voice: "alloy"              // voz del modelo (si tu cuenta la soporta)
+          }
+        };
+        dc.send(JSON.stringify(msg));
+      };
+      dc.onmessage = (ev) => log(`📩 DC: ${ev.data}`);
+      dc.onerror = (ev) => log(`❌ DC error: ${ev.message || ev}`);
+
+      // 3) Audio local (micrófono) -> envío al modelo
       localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
-      // 3) Reproducir audio remoto
+      // 4) Audio remoto -> reproducir
       pc.ontrack = (ev) => {
         const audio = document.createElement("audio");
         audio.autoplay = true;
@@ -34,10 +56,10 @@
         log("🔊 Audio remoto conectado");
       };
 
-      // 4) Crear y enviar la oferta SDP al backend
-      // Asegura que pedimos recibir audio remoto
+      // Recibir y enviar audio (full duplex)
       pc.addTransceiver("audio", { direction: "sendrecv" });
 
+      // 5) Oferta SDP -> backend -> OpenAI
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
@@ -51,10 +73,8 @@
       log(`↩️ /session status: ${r.status}`);
 
       if (!data?.sdp) throw new Error("No llegó SDP desde el servidor");
-
-      // 5) Configurar la respuesta SDP de OpenAI
       await pc.setRemoteDescription({ type: "answer", sdp: data.sdp });
-      log("✅ Conectado a modelo Realtime. ¡Habla!");
+      log("✅ Conectado a modelo Realtime. ¡Habla cerca del micrófono!");
 
     } catch (err) {
       log(`❌ Error al conectar: ${err.message}`);
