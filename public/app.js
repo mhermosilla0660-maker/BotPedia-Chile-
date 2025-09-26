@@ -4,7 +4,7 @@
   const muteBtn = document.getElementById("muteBtn");
   const hangupBtn = document.getElementById("hangupBtn");
 
-  let pc, localStream, dc;
+  let pc, localStream, dc, remoteAudio;
 
   const log = (m) => {
     const t = new Date().toLocaleTimeString();
@@ -17,49 +17,78 @@
 
   connectBtn.addEventListener("click", async () => {
     try {
-      // 1) RTCPeerConnection
       pc = new RTCPeerConnection({
         iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
       });
 
-      // 2) Canal de datos para eventos Realtime
+      // Canal de datos para eventos Realtime
       dc = pc.createDataChannel("oai-events");
       dc.onopen = () => {
-        log("🛰️ DataChannel abierto, pidiendo respuesta de audio…");
-        // Envia el comando para que el modelo HABLE en español
-        const msg = {
+        log("🛰️ DataChannel abierto");
+
+        // 1) Actualiza la sesión: activa voz y VAD del servidor
+        const sessUpdate = {
+          type: "session.update",
+          session: {
+            voice: "alloy",
+            turn_detection: { type: "server_vad", threshold: 0.5, prefix_padding_ms: 250, silence_duration_ms: 600 },
+          },
+        };
+        dc.send(JSON.stringify(sessUpdate));
+        log("➡️ session.update enviado (voice alloy, VAD servidor)");
+
+        // 2) Pide una primera respuesta hablada (saludo)
+        const sayHi = {
           type: "response.create",
           response: {
-            modalities: ["audio"],      // queremos audio de salida
+            modalities: ["audio"],
             instructions:
               "Habla en español chileno, claro y breve. " +
               "Eres BotPedia Chile, avatar de simulación educativa. " +
-              "Si detectas audio de usuario, salúdale y pídele que te cuente el caso.",
-            voice: "alloy"              // voz del modelo (si tu cuenta la soporta)
-          }
+              "Saluda y pide que te cuenten el caso clínico.",
+          },
         };
-        dc.send(JSON.stringify(msg));
+        dc.send(JSON.stringify(sayHi));
+        log("➡️ response.create enviado (audio)");
       };
-      dc.onmessage = (ev) => log(`📩 DC: ${ev.data}`);
-      dc.onerror = (ev) => log(`❌ DC error: ${ev.message || ev}`);
 
-      // 3) Audio local (micrófono) -> envío al modelo
+      dc.onmessage = (ev) => {
+        // Mostrar eventos y errores con detalle
+        try {
+          const data = JSON.parse(ev.data);
+          if (data.type === "error") {
+            log(`❌ DC error: ${JSON.stringify(data, null, 2)}`);
+          } else {
+            log(`DC: ${JSON.stringify(data)}`);
+          }
+        } catch {
+          log(`DC raw: ${ev.data}`);
+        }
+      };
+      dc.onerror = (ev) => log(`❌ DC onerror: ${ev.message || ev}`);
+
+      // micrófono -> enviar
       localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
-      // 4) Audio remoto -> reproducir
+      // audio remoto -> reproducir
       pc.ontrack = (ev) => {
-        const audio = document.createElement("audio");
-        audio.autoplay = true;
-        audio.srcObject = ev.streams[0];
-        document.body.appendChild(audio);
+        if (!remoteAudio) {
+          remoteAudio = document.createElement("audio");
+          remoteAudio.autoplay = true;
+          remoteAudio.playsInline = true;
+          remoteAudio.muted = false;
+          document.body.appendChild(remoteAudio);
+        }
+        remoteAudio.srcObject = ev.streams[0];
+        const p = remoteAudio.play();
+        if (p && p.catch) p.catch(() => log("ℹ️ Esperando interacción para reproducir audio"));
         log("🔊 Audio remoto conectado");
       };
 
-      // Recibir y enviar audio (full duplex)
       pc.addTransceiver("audio", { direction: "sendrecv" });
 
-      // 5) Oferta SDP -> backend -> OpenAI
+      // SDP -> backend
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
@@ -71,10 +100,10 @@
       });
       const data = await r.json();
       log(`↩️ /session status: ${r.status}`);
+      if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
 
-      if (!data?.sdp) throw new Error("No llegó SDP desde el servidor");
       await pc.setRemoteDescription({ type: "answer", sdp: data.sdp });
-      log("✅ Conectado a modelo Realtime. ¡Habla cerca del micrófono!");
+      log("✅ Conectado a modelo Realtime. Habla cerca del micrófono:");
 
     } catch (err) {
       log(`❌ Error al conectar: ${err.message}`);
