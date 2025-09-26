@@ -1,64 +1,49 @@
-// server.js (WebRTC con OpenAI Realtime)
 import express from "express";
+import fetch from "node-fetch";
 import cors from "cors";
 import * as dotenv from "dotenv";
-import path from "path";
-import { fileURLToPath } from "url";
-
 dotenv.config();
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json());
+app.use(express.static("public"));
 
-// __dirname para ES Modules
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const REALTIME_MODEL = process.env.REALTIME_MODEL || "gpt-4o-realtime-preview"; // <- AUDIO OK
+const PORT = process.env.PORT || 3000;
 
-// Sirve el frontend
-app.use(express.static(path.join(__dirname, "public")));
-app.get("/", (_req, res) => {
-  res.sendFile(path.join(__dirname, "public", "index.html"));
-});
-
-// POST /session — intercambia SDP con la API Realtime
+// Negociación WebRTC con OpenAI Realtime
 app.post("/session", async (req, res) => {
   try {
-    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-    const REALTIME_MODEL = process.env.REALTIME_MODEL || "gpt-realtime";
-    if (!OPENAI_API_KEY) {
-      return res.status(500).json({ error: "Falta OPENAI_API_KEY" });
-    }
-    const { sdp } = req.body || {};
-    if (!sdp) return res.status(400).json({ error: "Falta sdp en body" });
+    const { sdp } = req.body;
+    if (!sdp) return res.status(400).json({ error: "Missing SDP offer" });
 
-    const fetchRes = await fetch(
-      `https://api.openai.com/v1/realtime?model=${REALTIME_MODEL}`,
+    const r = await fetch(
+      `https://api.openai.com/v1/realtime?model=${encodeURIComponent(REALTIME_MODEL)}`,
       {
         method: "POST",
         headers: {
           Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "Content-Type": "application/sdp",
           "OpenAI-Beta": "realtime=v1",
+          "Content-Type": "application/sdp",
         },
         body: sdp,
       }
     );
 
-    const answerSDP = await fetchRes.text(); // la API devuelve SDP en texto
-    if (!fetchRes.ok) {
-      return res
-        .status(fetchRes.status)
-        .json({ error: "OpenAI Realtime falló", details: answerSDP });
+    const answer = await r.text(); // la API responde SDP en texto
+    if (!r.ok) {
+      console.error("Realtime error:", r.status, answer);
+      return res.status(r.status).json({ error: answer });
     }
-    // Devolvemos el SDP de respuesta al navegador
-    res.json({ sdp: answerSDP });
+    return res.json({ sdp: answer });
   } catch (err) {
-    res.status(500).json({ error: "Error en /session", details: String(err) });
+    console.error(err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ Server en http://localhost:${PORT}`);
+  console.log(`Server on http://localhost:${PORT}`);
 });
