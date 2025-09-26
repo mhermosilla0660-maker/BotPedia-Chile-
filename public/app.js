@@ -1,197 +1,251 @@
 // public/app.js
-// BotPedia Chile — Avatar de Voz (WebRTC + TTS en el navegador)
+// Cliente mínimo: negocia WebRTC, recibe texto del modelo por DataChannel
+// y lo lee con TTS del teléfono (speechSynthesis).
 
-// ====== UI ======
-const btnConnect  = document.getElementById("connect");
-const btnMute     = document.getElementById("mute");
-const btnHangup   = document.getElementById("hangup");
-const logEl       = document.getElementById("log");
-const vu          = document.getElementById("vu"); // barra sencilla opcional
-const remoteAudio = document.getElementById("remoteAudio"); // puede no existir
+const logEl = (() => {
+  const pre = document.createElement("pre");
+  pre.style.whiteSpace = "pre-wrap";
+  pre.style.fontSize = "12px";
+  pre.style.lineHeight = "1.25";
+  document.body.appendChild(pre);
+  return pre;
+})();
 
-function log(msg, emoji="") {
-  const t = new Date().toLocaleTimeString();
-  logEl.textContent += `\n[${t}] ${emoji ? emoji + " " : ""}${msg}`;
+function log(...args) {
+  const line = args
+    .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
+    .join(" ");
+  console.log(...args);
+  logEl.textContent += line + "\n";
   logEl.scrollTop = logEl.scrollHeight;
 }
 
-// ====== Estado global ======
-let pc, dc, micStream, micTrack, analysing = false;
-let mediaRecorder, audioChunks = [];
-let speakingBuffer = "";  // para acumular texto y leerlo al finalizar
-
-// ====== Util ======
-function safeJSONParse(s) {
-  try { return JSON.parse(s); } catch { return null; }
-}
-
+// ========= TTS (texto -> voz del teléfono) =========
 function speak(text) {
-  if (!text || !text.trim()) return;
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = "es-CL"; // puedes cambiar a "es-ES" o "es-MX"
-  speechSynthesis.cancel();
-  speechSynthesis.speak(u);
-}
-
-function updateVU(level) {
-  if (!vu) return;
-  vu.style.width = Math.min(100, Math.max(0, level)) + "%";
-}
-
-// ====== Conectar ======
-async function connect() {
   try {
-    btnConnect.disabled = true;
-    log("Conectando… llamando a /session", "🌐");
-
-    // 1) Crear PeerConnection
-    pc = new RTCPeerConnection({
-      iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }],
-    });
-
-    // 2) Audio remoto (si el backend devuelve audio; no es obligatorio)
-    pc.ontrack = (e) => {
-      if (remoteAudio) {
-        remoteAudio.srcObject = e.streams[0];
-        remoteAudio.play().catch(()=>{});
-      }
-      log("Audio remoto conectado", "🔊");
-    };
-
-    // 3) DataChannel para eventos Realtime
-    dc = pc.createDataChannel("oai-events");
-    dc.onopen = () => {
-      log("DataChannel abierto, pidiendo respuesta de texto…", "🛰️");
-      // Apenas se abra el canal, pedimos que el modelo hable (texto)
-      solicitarRespuesta("Hola, preséntate brevemente y pide el motivo de consulta.");
-    };
-    dc.onerror = (ev) => log("DataChannel error: " + ev.message, "❌");
-
-    // 4) Manejo de mensajes desde el modelo
-    dc.onmessage = (e) => {
-      const msg = safeJSONParse(e.data);
-      if (!msg) return;
-
-      // Logs “verbosos” en verde para debug fácil:
-      if (msg.type && msg.type !== "input_audio_buffer.stream") {
-        log("DC: " + JSON.stringify(msg), "✉️");
-      }
-
-      // Buffer de texto incremental
-      if (msg.type === "response.output_text.delta") {
-        speakingBuffer += (msg.delta || "");
-      }
-
-      // Cuando termina la respuesta, hablamos con TTS del navegador
-      if (msg.type === "response.completed" || msg.type === "response.done") {
-        const text = speakingBuffer.trim();
-        if (text) {
-          speak(text);
-          speakingBuffer = "";
-        }
-      }
-
-      // Errores desde el modelo
-      if (msg.type === "error") {
-        log("DC error: " + JSON.stringify(msg), "❌");
-      }
-    };
-
-    // 5) Captura micrófono (opcional; sirve para VU y para activación de voz local)
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    micTrack  = micStream.getTracks()[0];
-    pc.addTrack(micTrack, micStream);
-
-    // Analizador de nivel (VU)
-    const ac = new (window.AudioContext || window.webkitAudioContext)();
-    const src = ac.createMediaStreamSource(micStream);
-    const analyser = ac.createAnalyser();
-    analyser.fftSize = 512;
-    const data = new Uint8Array(analyser.frequencyBinCount);
-    src.connect(analyser);
-    analysing = true;
-    (function loop(){
-      if (!analysing) return;
-      analyser.getByteTimeDomainData(data);
-      let peak = 0;
-      for (let i=0;i<data.length;i++) {
-        const v = Math.abs(data[i]-128);
-        if (v>peak) peak=v;
-      }
-      updateVU((peak/128)*100);
-      requestAnimationFrame(loop);
-    })();
-
-    // 6) SDP Offer → /session → Answer
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    log("Enviando SDP offer a /session…", "🛰️");
-
-    const r = await fetch("/session", {
-      method: "POST",
-      headers: { "Content-Type": "application/sdp" },
-      body: offer.sdp
-    });
-    log(`/session status: ${r.status}`, "🅿️");
-    const answerSDP = await r.text();
-    await pc.setRemoteDescription({ type: "answer", sdp: answerSDP });
-
-    log("Conectado a modelo Realtime. ¡Habla cerca del micrófono!", "✅");
-  } catch (err) {
-    console.error(err);
-    log("Error al conectar: " + (err?.message || err), "❌");
-    btnConnect.disabled = false;
+    if (!text) return;
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    // Español de Chile (ajusta si prefieres otra)
+    u.lang = "es-CL";
+    u.rate = 1;
+    window.speechSynthesis.speak(u);
+  } catch (e) {
+    log("⚠️ TTS error:", e);
   }
 }
 
-// ====== Enviar pedido al modelo ======
-function solicitarRespuesta(instructions) {
+// ========= UI =========
+const btnConnect = document.getElementById("btnConnect") || (() => {
+  // fallback si tu HTML no tiene id
+  const b = document.querySelector("button") || document.createElement("button");
+  b.textContent = "Conectar";
+  document.body.insertBefore(b, document.body.firstChild);
+  return b;
+})();
+
+const btnMute = document.getElementById("btnMute");
+const btnHang = document.getElementById("btnHang");
+
+let pc = null;
+let dc = null;
+let connected = false;
+
+btnConnect.addEventListener("click", async () => {
+  if (connected) {
+    log("Ya está conectado.");
+    return;
+  }
+  try {
+    await connectRealtime();
+  } catch (e) {
+    log("❌ Error al conectar:", e);
+  }
+});
+
+if (btnHang) {
+  btnHang.addEventListener("click", () => {
+    if (pc) pc.close();
+    pc = null;
+    connected = false;
+    log("☎️ Colgado.");
+  });
+}
+
+async function connectRealtime() {
+  log("🌐 Iniciando negociación…");
+
+  // 1) PeerConnection
+  pc = new RTCPeerConnection({
+    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+  });
+
+  // (Opcional) crea un MediaStream de salida por si en el futuro recibes audio remoto
+  const remoteAudio = document.getElementById("remoteAudio") || (() => {
+    const a = document.createElement("audio");
+    a.autoplay = true;
+    a.playsInline = true;
+    a.id = "remoteAudio";
+    document.body.appendChild(a);
+    return a;
+  })();
+
+  pc.ontrack = (ev) => {
+    // Si el modelo enviara audio remoto, sonaría aquí
+    remoteAudio.srcObject = ev.streams[0];
+    log("🔊 Audio remoto conectado");
+  };
+
+  // 2) Canal de datos para eventos Realtime
+  dc = pc.createDataChannel("oai-events");
+  dc.onopen = () => {
+    log("📨 DataChannel abierto");
+    // Al abrir, configuramos la sesión y forzamos un primer turno de texto
+    bootstrapSessionAndAsk();
+  };
+  dc.onmessage = (ev) => handleRealtimeMessage(ev.data);
+
+  // 3) Oferta SDP local
+  const offer = await pc.createOffer({
+    offerToReceiveAudio: true,
+    offerToReceiveVideo: false,
+  });
+  await pc.setLocalDescription(offer);
+
+  // 4) Enviar oferta al backend /session (que la reenvía a OpenAI)
+  const resp = await fetch("/session", {
+    method: "POST",
+    headers: { "Content-Type": "application/sdp" },
+    body: offer.sdp,
+  });
+  const answerSdp = await resp.text();
+  if (!resp.ok) {
+    log("❌ /session status:", resp.status);
+    log(answerSdp);
+    throw new Error("Falló negociación con /session");
+  }
+
+  await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+  connected = true;
+  log("✅ Conectado a modelo Realtime.");
+}
+
+// Configura la sesión para TEXTO y envía un primer mensaje para que hable
+function bootstrapSessionAndAsk() {
   if (!dc || dc.readyState !== "open") return;
 
-  // En algunas integraciones se envía un "session.update".
-  // Aquí nos aseguramos de no pedir audio (que causaba el error):
-  dc.send(JSON.stringify({
+  // 1) Asegura que el modelo responderá en TEXTO (no pedimos 'audio')
+  const sessionUpdate = {
     type: "session.update",
     session: {
-      // sin 'modalities' aquí; si alguna lib lo requiere, que sea ["text"]
+      // No forzamos voice aquí. Dejamos SOLO texto.
+      // Si más adelante quieres audio del modelo: response.modalities = ["audio"]
+      // y ajustas el server/app acorde.
+      input_audio_format: { type: "input_text" },
+      turn_detection: null,
+    },
+  };
+  dc.send(JSON.stringify(sessionUpdate));
+  log("🛠️ session.update enviado");
+
+  // 2) Primer turno: pedimos que se presente y confirme conexión
+  const saludo =
+    "Preséntate brevemente como BotPedia Chile. Di 'listo, conectado' y luego pregúntame en qué caso clínico pediátrico quieres practicar.";
+
+  // Crea un item de texto
+  dc.send(
+    JSON.stringify({
+      type: "conversation.item.create",
+      item: { type: "input_text", text: saludo, role: "user" },
+    })
+  );
+
+  // Pide respuesta
+  dc.send(JSON.stringify({ type: "response.create" }));
+  log("➡️ response.create enviado");
+}
+
+// Maneja todos los eventos del Realtime que llegan por DataChannel
+function handleRealtimeMessage(raw) {
+  let msg;
+  try {
+    msg = JSON.parse(raw);
+  } catch {
+    log("📩", raw);
+    return;
+  }
+
+  // Descomenta si quieres ver TODO:
+  // log("DC:", msg);
+
+  switch (msg.type) {
+    case "session.created":
+      log("🆗 session.created");
+      break;
+
+    case "response.created":
+      // comenzó a generar
+      break;
+
+    case "response.delta":
+      // Algunas versiones envían deltas; si viene texto incremental, lo acumulas aquí si quieres.
+      break;
+
+    case "response.completed":
+    case "response.done": {
+      // En la mayoría de versiones, aquí viene el texto final
+      const text =
+        msg.response?.output_text?.join(" ") ||
+        msg.output_text?.join?.(" ") ||
+        extractAnyText(msg) ||
+        "";
+      if (text) {
+        log("🗣️", text);
+        speak(text); // TTS del teléfono
+      }
+      break;
     }
-  }));
 
-  // Pedimos una respuesta de TEXTO
-  dc.send(JSON.stringify({
-    type: "response.create",
-    response: {
-      modalities: ["text"],       // <- CLAVE: sólo texto
-      conversation: "default",
-      instructions: instructions || "Continúa la conversación en español chileno."
+    case "conversation.item.created": {
+      // A veces el mensaje viene también aquí:
+      const t = extractAnyText(msg) || "";
+      if (t) {
+        log("🗣️", t);
+        speak(t);
+      }
+      break;
     }
-  }));
-  log("response.create enviado (text)", "➡️");
+
+    case "error":
+      log("❌ DC error:", msg);
+      break;
+
+    default:
+      // Otros eventos
+      // log("ℹ️", msg.type);
+      break;
+  }
 }
 
-// ====== Silenciar micro ======
-function toggleMute() {
-  if (!micTrack) return;
-  micTrack.enabled = !micTrack.enabled;
-  btnMute.textContent = micTrack.enabled ? "Silenciar" : "Reactivar";
-  log(micTrack.enabled ? "Micrófono activo" : "Micrófono silenciado", micTrack.enabled ? "🎙️" : "🔇");
+// Intenta encontrar texto en distintas formas (defensivo ante cambios de API)
+function extractAnyText(msg) {
+  try {
+    // 1) output_text directo
+    if (msg.response?.output_text?.length)
+      return msg.response.output_text.join(" ");
+
+    // 2) item.message.content[*].text u otras variantes
+    const content =
+      msg.item?.content || msg.response?.content || msg.delta?.content || [];
+    const parts = [];
+    for (const c of content) {
+      if (typeof c === "string") parts.push(c);
+      if (c?.text) parts.push(c.text);
+      if (c?.delta) parts.push(c.delta);
+      if (c?.type?.includes?.("text") && c?.content) parts.push(c.content);
+    }
+    return parts.join(" ");
+  } catch {
+    return "";
+  }
 }
-
-// ====== Colgar ======
-function hangup() {
-  analysing = false;
-  if (dc) try { dc.close(); } catch {}
-  if (pc) try { pc.close(); } catch {}
-  if (micStream) micStream.getTracks().forEach(t=>t.stop());
-  speechSynthesis.cancel();
-  btnConnect.disabled = false;
-  log("Llamada finalizada", "📵");
-}
-
-// ====== Enlazar UI ======
-btnConnect?.addEventListener("click", connect);
-btnMute?.addEventListener("click", toggleMute);
-btnHangup?.addEventListener("click", hangup);
-
-// (Opcional) Enviar una primera instrucción al hacer click en Conectar si el DC ya está abierto
-window.solicitarRespuesta = solicitarRespuesta;
