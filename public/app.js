@@ -1,128 +1,197 @@
-(function () {
-  const logBox = document.getElementById("log");
-  const connectBtn = document.getElementById("connectBtn");
-  const muteBtn = document.getElementById("muteBtn");
-  const hangupBtn = document.getElementById("hangupBtn");
+// public/app.js
+// BotPedia Chile — Avatar de Voz (WebRTC + TTS en el navegador)
 
-  let pc, localStream, dc, remoteAudio;
+// ====== UI ======
+const btnConnect  = document.getElementById("connect");
+const btnMute     = document.getElementById("mute");
+const btnHangup   = document.getElementById("hangup");
+const logEl       = document.getElementById("log");
+const vu          = document.getElementById("vu"); // barra sencilla opcional
+const remoteAudio = document.getElementById("remoteAudio"); // puede no existir
 
-  const log = (m) => {
-    const t = new Date().toLocaleTimeString();
-    logBox.textContent += `[${t}] ${m}\n`;
-    logBox.scrollTop = logBox.scrollHeight;
-  };
+function log(msg, emoji="") {
+  const t = new Date().toLocaleTimeString();
+  logEl.textContent += `\n[${t}] ${emoji ? emoji + " " : ""}${msg}`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
 
-  window.addEventListener("error", e => log(`JS error: ${e.message}`));
-  window.addEventListener("unhandledrejection", e => log(`Promise error: ${e.reason}`));
+// ====== Estado global ======
+let pc, dc, micStream, micTrack, analysing = false;
+let mediaRecorder, audioChunks = [];
+let speakingBuffer = "";  // para acumular texto y leerlo al finalizar
 
-  connectBtn.addEventListener("click", async () => {
-    try {
-      pc = new RTCPeerConnection({
-        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-      });
+// ====== Util ======
+function safeJSONParse(s) {
+  try { return JSON.parse(s); } catch { return null; }
+}
 
-      // Canal de datos para eventos Realtime
-      dc = pc.createDataChannel("oai-events");
-      dc.onopen = () => {
-        log("🛰️ DataChannel abierto");
+function speak(text) {
+  if (!text || !text.trim()) return;
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "es-CL"; // puedes cambiar a "es-ES" o "es-MX"
+  speechSynthesis.cancel();
+  speechSynthesis.speak(u);
+}
 
-        // 1) Actualiza la sesión: activa voz y VAD del servidor
-        const sessUpdate = {
-          type: "session.update",
-          session: {
-            voice: "alloy",
-            turn_detection: { type: "server_vad", threshold: 0.5, prefix_padding_ms: 250, silence_duration_ms: 600 },
-          },
-        };
-        dc.send(JSON.stringify(sessUpdate));
-        log("➡️ session.update enviado (voice alloy, VAD servidor)");
+function updateVU(level) {
+  if (!vu) return;
+  vu.style.width = Math.min(100, Math.max(0, level)) + "%";
+}
 
-        // 2) Pide una primera respuesta hablada (saludo)
-        const sayHi = {
-          type: "response.create",
-          response: {
-            modalities: ["audio"],
-            instructions:
-              "Habla en español chileno, claro y breve. " +
-              "Eres BotPedia Chile, avatar de simulación educativa. " +
-              "Saluda y pide que te cuenten el caso clínico.",
-          },
-        };
-        dc.send(JSON.stringify(sayHi));
-        log("➡️ response.create enviado (audio)");
-      };
+// ====== Conectar ======
+async function connect() {
+  try {
+    btnConnect.disabled = true;
+    log("Conectando… llamando a /session", "🌐");
 
-      dc.onmessage = (ev) => {
-        // Mostrar eventos y errores con detalle
-        try {
-          const data = JSON.parse(ev.data);
-          if (data.type === "error") {
-            log(`❌ DC error: ${JSON.stringify(data, null, 2)}`);
-          } else {
-            log(`DC: ${JSON.stringify(data)}`);
-          }
-        } catch {
-          log(`DC raw: ${ev.data}`);
+    // 1) Crear PeerConnection
+    pc = new RTCPeerConnection({
+      iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }],
+    });
+
+    // 2) Audio remoto (si el backend devuelve audio; no es obligatorio)
+    pc.ontrack = (e) => {
+      if (remoteAudio) {
+        remoteAudio.srcObject = e.streams[0];
+        remoteAudio.play().catch(()=>{});
+      }
+      log("Audio remoto conectado", "🔊");
+    };
+
+    // 3) DataChannel para eventos Realtime
+    dc = pc.createDataChannel("oai-events");
+    dc.onopen = () => {
+      log("DataChannel abierto, pidiendo respuesta de texto…", "🛰️");
+      // Apenas se abra el canal, pedimos que el modelo hable (texto)
+      solicitarRespuesta("Hola, preséntate brevemente y pide el motivo de consulta.");
+    };
+    dc.onerror = (ev) => log("DataChannel error: " + ev.message, "❌");
+
+    // 4) Manejo de mensajes desde el modelo
+    dc.onmessage = (e) => {
+      const msg = safeJSONParse(e.data);
+      if (!msg) return;
+
+      // Logs “verbosos” en verde para debug fácil:
+      if (msg.type && msg.type !== "input_audio_buffer.stream") {
+        log("DC: " + JSON.stringify(msg), "✉️");
+      }
+
+      // Buffer de texto incremental
+      if (msg.type === "response.output_text.delta") {
+        speakingBuffer += (msg.delta || "");
+      }
+
+      // Cuando termina la respuesta, hablamos con TTS del navegador
+      if (msg.type === "response.completed" || msg.type === "response.done") {
+        const text = speakingBuffer.trim();
+        if (text) {
+          speak(text);
+          speakingBuffer = "";
         }
-      };
-      dc.onerror = (ev) => log(`❌ DC onerror: ${ev.message || ev}`);
+      }
 
-      // micrófono -> enviar
-      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+      // Errores desde el modelo
+      if (msg.type === "error") {
+        log("DC error: " + JSON.stringify(msg), "❌");
+      }
+    };
 
-      // audio remoto -> reproducir
-      pc.ontrack = (ev) => {
-        if (!remoteAudio) {
-          remoteAudio = document.createElement("audio");
-          remoteAudio.autoplay = true;
-          remoteAudio.playsInline = true;
-          remoteAudio.muted = false;
-          document.body.appendChild(remoteAudio);
-        }
-        remoteAudio.srcObject = ev.streams[0];
-        const p = remoteAudio.play();
-        if (p && p.catch) p.catch(() => log("ℹ️ Esperando interacción para reproducir audio"));
-        log("🔊 Audio remoto conectado");
-      };
+    // 5) Captura micrófono (opcional; sirve para VU y para activación de voz local)
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    micTrack  = micStream.getTracks()[0];
+    pc.addTrack(micTrack, micStream);
 
-      pc.addTransceiver("audio", { direction: "sendrecv" });
+    // Analizador de nivel (VU)
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ac.createMediaStreamSource(micStream);
+    const analyser = ac.createAnalyser();
+    analyser.fftSize = 512;
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    src.connect(analyser);
+    analysing = true;
+    (function loop(){
+      if (!analysing) return;
+      analyser.getByteTimeDomainData(data);
+      let peak = 0;
+      for (let i=0;i<data.length;i++) {
+        const v = Math.abs(data[i]-128);
+        if (v>peak) peak=v;
+      }
+      updateVU((peak/128)*100);
+      requestAnimationFrame(loop);
+    })();
 
-      // SDP -> backend
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
+    // 6) SDP Offer → /session → Answer
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    log("Enviando SDP offer a /session…", "🛰️");
 
-      log("🌐 Enviando SDP offer a /session…");
-      const r = await fetch("/session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sdp: offer.sdp }),
-      });
-      const data = await r.json();
-      log(`↩️ /session status: ${r.status}`);
-      if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+    const r = await fetch("/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/sdp" },
+      body: offer.sdp
+    });
+    log(`/session status: ${r.status}`, "🅿️");
+    const answerSDP = await r.text();
+    await pc.setRemoteDescription({ type: "answer", sdp: answerSDP });
 
-      await pc.setRemoteDescription({ type: "answer", sdp: data.sdp });
-      log("✅ Conectado a modelo Realtime. Habla cerca del micrófono:");
+    log("Conectado a modelo Realtime. ¡Habla cerca del micrófono!", "✅");
+  } catch (err) {
+    console.error(err);
+    log("Error al conectar: " + (err?.message || err), "❌");
+    btnConnect.disabled = false;
+  }
+}
 
-    } catch (err) {
-      log(`❌ Error al conectar: ${err.message}`);
+// ====== Enviar pedido al modelo ======
+function solicitarRespuesta(instructions) {
+  if (!dc || dc.readyState !== "open") return;
+
+  // En algunas integraciones se envía un "session.update".
+  // Aquí nos aseguramos de no pedir audio (que causaba el error):
+  dc.send(JSON.stringify({
+    type: "session.update",
+    session: {
+      // sin 'modalities' aquí; si alguna lib lo requiere, que sea ["text"]
     }
-  });
+  }));
 
-  muteBtn.addEventListener("click", () => {
-    if (!localStream) return;
-    const t = localStream.getTracks()[0];
-    t.enabled = !t.enabled;
-    log(t.enabled ? "🔊 Micrófono ACTIVADO" : "🔇 Micrófono SILENCIADO");
-  });
-
-  hangupBtn.addEventListener("click", () => {
-    if (pc) {
-      pc.getSenders().forEach(s => s.track && s.track.stop());
-      pc.close();
-      pc = null;
-      log("📴 Llamada colgada");
+  // Pedimos una respuesta de TEXTO
+  dc.send(JSON.stringify({
+    type: "response.create",
+    response: {
+      modalities: ["text"],       // <- CLAVE: sólo texto
+      conversation: "default",
+      instructions: instructions || "Continúa la conversación en español chileno."
     }
-  });
-})();
+  }));
+  log("response.create enviado (text)", "➡️");
+}
+
+// ====== Silenciar micro ======
+function toggleMute() {
+  if (!micTrack) return;
+  micTrack.enabled = !micTrack.enabled;
+  btnMute.textContent = micTrack.enabled ? "Silenciar" : "Reactivar";
+  log(micTrack.enabled ? "Micrófono activo" : "Micrófono silenciado", micTrack.enabled ? "🎙️" : "🔇");
+}
+
+// ====== Colgar ======
+function hangup() {
+  analysing = false;
+  if (dc) try { dc.close(); } catch {}
+  if (pc) try { pc.close(); } catch {}
+  if (micStream) micStream.getTracks().forEach(t=>t.stop());
+  speechSynthesis.cancel();
+  btnConnect.disabled = false;
+  log("Llamada finalizada", "📵");
+}
+
+// ====== Enlazar UI ======
+btnConnect?.addEventListener("click", connect);
+btnMute?.addEventListener("click", toggleMute);
+btnHangup?.addEventListener("click", hangup);
+
+// (Opcional) Enviar una primera instrucción al hacer click en Conectar si el DC ya está abierto
+window.solicitarRespuesta = solicitarRespuesta;
