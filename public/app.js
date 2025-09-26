@@ -1,25 +1,37 @@
-async function connect() {
-  log("🔄 Conectando...");
-  try {
-    const resp = await fetch("/session");
-    if (!resp.ok) throw new Error("Error al crear sesión");
-    const data = await resp.json();
-    log("✅ Sesión creada");
-    console.log("Sesión:", data);
-  } catch (err) {
-    log("❌ Error al conectar: " + err.message);
-  }
-}
+(function () {
+  const logBox = document.getElementById("log");
+  const connectBtn = document.getElementById("connectBtn");
+  const muteBtn = document.getElementById("muteBtn");
+  const hangupBtn = document.getElementById("hangupBtn");
 
-function mute() {
-  log("🔇 Silenciado (demo)");
-}
+  const log = (msg) => {
+    const t = new Date().toLocaleTimeString();
+    logBox.textContent += `[${t}] ${msg}\n`;
+    logBox.scrollTop = logBox.scrollHeight;
+  };
 
-function hangup() {
-  log("📴 Llamada terminada (demo)");
-}
+  // Captura errores JS para que aparezcan en pantalla
+  window.addEventListener("error", (e) => log(`JS error: ${e.message}`));
+  window.addEventListener("unhandledrejection", (e) => log(`Promise error: ${e.reason}`));
 
-function log(msg) {
-  const logDiv = document.getElementById("log");
-  logDiv.innerHTML += `<p>${msg}</p>`;
-}
+  connectBtn.addEventListener("click", async () => {
+    try {
+      log("🔄 Conectando… llamando a /session");
+      const r = await fetch("/session", { method: "GET" });
+      log(`↩️ /session status: ${r.status}`);
+      const txt = await r.text(); // muestro bruto por si la respuesta no es JSON
+      log(`📦 Respuesta: ${txt}`);
+      try {
+        const data = JSON.parse(txt);
+        if (data?.ok) log("✅ Sesión creada correctamente");
+      } catch {
+        // no era JSON, igual ya lo mostramos arriba
+      }
+    } catch (err) {
+      log(`❌ Error de red: ${err.message}`);
+    }
+  });
+
+  muteBtn.addEventListener("click", () => log("🔇 Silenciar (demo)"));
+  hangupBtn.addEventListener("click", () => log("📴 Colgar (demo)"));
+})();
