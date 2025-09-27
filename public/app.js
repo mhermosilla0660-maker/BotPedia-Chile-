@@ -1,142 +1,139 @@
-// public/app.js
-// Cliente WebRTC mínimo para conectar a tu backend y hablar vía TTS del navegador.
+    // public/app.js
+const $log = (msg) => {
+  const el = document.getElementById("log");
+  el.textContent += (typeof msg === "string" ? msg : JSON.stringify(msg)) + "\n";
+  el.scrollTop = el.scrollHeight;
+};
 
-const logEl = (() => {
-  const pre = document.createElement("pre");
-  pre.style.whiteSpace = "pre-wrap";
-  pre.style.fontSize = "12px";
-  pre.style.lineHeight = "1.25";
-  document.body.appendChild(pre);
-  return pre;
-})();
+let pc, dc, remoteAudio;
 
-function log(...args) {
-  const line = args
-    .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
-    .join(" ");
-  console.log(...args);
-  logEl.textContent += line + "\n";
-  logEl.scrollTop = logEl.scrollHeight;
-}
-
-// ========= TTS =========
-function speak(text) {
+async function conectar() {
   try {
-    if (!text) return;
-    window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = "es-CL";
-    u.rate = 1;
-    window.speechSynthesis.speak(u);
-  } catch (e) {
-    log("⚠️ TTS error:", e);
+    $log("🌐 Iniciando negociación…");
+
+    // Elemento de audio remoto (autoplay por gesto del botón)
+    if (!remoteAudio) {
+      remoteAudio = document.createElement("audio");
+      remoteAudio.autoplay = true;
+      remoteAudio.playsInline = true;
+      document.body.appendChild(remoteAudio);
+    }
+
+    // 1) PeerConnection
+    pc = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+    });
+
+    // 2) Audio local (micrófono)
+    const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mic.getTracks().forEach((t) => pc.addTrack(t, mic));
+
+    // 3) Audio remoto → al elemento <audio>
+    pc.ontrack = (ev) => {
+      $log("🔊 Audio remoto conectado");
+      remoteAudio.srcObject = ev.streams[0];
+    };
+
+    // 4) DataChannel para eventos Realtime
+    dc = pc.createDataChannel("oai-events");
+    dc.onopen = () => {
+      $log("✉️  DataChannel abierto");
+      // Nota: también mandamos cosas cuando llegue "session.created"
+    };
+    dc.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data);
+        // Muestra eventos relevantes
+        if (data.type === "session.created") {
+          $log("🆗 session.created");
+          enviarConfiguracionYPrimerTurno();
+        } else if (data.type === "response.output_text.delta") {
+          // Texto parcial (por si algún día lo muestras)
+        } else if (data.type === "response.error" || data.type === "error") {
+          $log("❌ DC error: " + JSON.stringify(data, null, 2));
+        }
+      } catch {
+        // Mensaje no-JSON (ignorar)
+      }
+    };
+
+    // 5) SDP local
+    const offer = await pc.createOffer({
+      offerToReceiveAudio: true,
+      offerToReceiveVideo: false,
+    });
+    await pc.setLocalDescription(offer);
+
+    // 6) Llamar a tu servidor para crear la sesión
+    const r = await fetch("/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/sdp" },
+      body: offer.sdp,
+    });
+
+    if (!r.ok) {
+      const txt = await r.text();
+      $log(`/session status: ${r.status}\n${txt}`);
+      return;
+    }
+
+    const answerSDP = await r.text();
+    await pc.setRemoteDescription({ type: "answer", sdp: answerSDP });
+
+    $log("✅ Conectado a modelo Realtime.");
+  } catch (err) {
+    console.error(err);
+    $log("❌ Error conectando: " + (err?.message || err));
   }
 }
 
-let pc = null;
-let dc = null;
+// Envía turn detection + system prompt y un primer response.create que hable
+function enviarConfiguracionYPrimerTurno() {
+  if (!dc || dc.readyState !== "open") return;
 
-document.querySelector("button")?.addEventListener("click", connectRealtime);
-
-async function connectRealtime() {
-  log("🌐 Iniciando negociación…");
-
-  pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
-
-  const remoteAudio = document.createElement("audio");
-  remoteAudio.autoplay = true;
-  remoteAudio.playsInline = true;
-  document.body.appendChild(remoteAudio);
-
-  pc.ontrack = (ev) => {
-    remoteAudio.srcObject = ev.streams[0];
-    log("🔊 Audio remoto conectado");
-  };
-
-  dc = pc.createDataChannel("oai-events");
-  dc.onopen = () => {
-    log("📨 DataChannel abierto");
-    sendInitialMessage();
-  };
-  dc.onmessage = (ev) => handleRealtimeMessage(ev.data);
-
-  const offer = await pc.createOffer({ offerToReceiveAudio: true });
-  await pc.setLocalDescription(offer);
-
-  const resp = await fetch("/session", {
-    method: "POST",
-    headers: { "Content-Type": "application/sdp" },
-    body: offer.sdp,
-  });
-  const answerSdp = await resp.text();
-
-  if (!resp.ok) {
-    log("❌ /session status:", resp.status);
-    log(answerSdp);
-    throw new Error("Falló negociación con /session");
-  }
-
-  await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
-  log("✅ Conectado a modelo Realtime.");
-}
-
-function sendInitialMessage() {
-  // NO enviamos session.update con input_audio_format inválido
-  log("🛠️ Sesión lista, enviando primer turno...");
-
-  const saludo =
-    "Soy BotPedia Chile. ¡Listo y conectado! ¿Qué caso clínico pediátrico quieres simular?";
-
+  // a) Configuración de la sesión (detección de voz en servidor + prompt)
   dc.send(
     JSON.stringify({
-      type: "conversation.item.create",
-      item: { type: "message", role: "user", content: saludo },
+      type: "session.update",
+      session: {
+        turn_detection: { type: "server_vad" },
+        instructions:
+          "Eres BotPedia Chile. Responde en español de Chile, corto y claro. " +
+          "Si el usuario guarda silencio, da una indicación breve para continuar.",
+      },
     })
   );
+  $log("🛠️  session.update enviado");
 
-  dc.send(JSON.stringify({ type: "response.create" }));
+  // b) Primer turno para que SALUDE en voz
+  dc.send(
+    JSON.stringify({
+      type: "response.create",
+      response: {
+        modalities: ["audio"],
+        instructions:
+          "Hola, soy BotPedia Chile. Estoy listo para escuchar tu caso. " +
+          "Por ejemplo: 'Niño de 6 años con ataque de asma'.",
+      },
+    })
+  );
+  $log("➡️  response.create enviado");
 }
 
-function handleRealtimeMessage(raw) {
-  let msg;
+function silenciar() {
+  if (!dc || dc.readyState !== "open") return;
+  dc.send(JSON.stringify({ type: "response.cancel" }));
+  $log("🔇 Silenciar (cancel) enviado");
+}
+
+function colgar() {
   try {
-    msg = JSON.parse(raw);
-  } catch {
-    log("📩", raw);
-    return;
-  }
-
-  switch (msg.type) {
-    case "session.created":
-      log("🆗 session.created");
-      break;
-
-    case "response.done":
-    case "response.completed": {
-      const text = msg.response?.output_text?.join(" ") || "";
-      if (text) {
-        log("🗣️", text);
-        speak(text);
-      }
-      break;
-    }
-
-    case "conversation.item.created": {
-      const t =
-        msg.item?.content?.map((c) => c.text || c)?.join(" ") || "";
-      if (t) {
-        log("🗣️", t);
-        speak(t);
-      }
-      break;
-    }
-
-    case "error":
-      log("❌ DC error:", msg);
-      break;
-
-    default:
-      // Otros eventos
-      break;
-  }
+    dc && dc.close();
+    pc && pc.close();
+  } catch {}
+  $log("🛑 Llamada finalizada");
 }
+
+window.conectar = conectar;
+window.silenciar = silenciar;
+window.colgar = colgar;
